@@ -11,3 +11,6 @@ uploads/
 *.db
 *.sqlite
 *.sqlite3
+private_uploads/
+
+private_uploads/
