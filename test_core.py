@@ -1,14 +1,59 @@
-import os; os.environ["DATABASE_URL"] = "sqlite:///./test.db"; os.environ["DISABLE_SCHEDULER"] = "1"; os.environ["OCR_ENABLED"] = "1"
-import shutil
+import atexit
+import os, shutil, tempfile
 from pathlib import Path
-from fastapi.testclient import TestClient
-from main import app
 from datetime import date, datetime, timedelta
 from io import BytesIO
 from uuid import uuid4
+import pytest
+from fastapi.testclient import TestClient
 from PIL import Image
 from pypdf import PdfWriter
+
+_TEST_ROOT = Path(tempfile.mkdtemp(prefix="caresync-tests-")).resolve()
+_TEST_DB_NAME = f"caresync-tests-{uuid4().hex}"
+os.environ["CARESYNC_TEST_ROOT"] = str(_TEST_ROOT)
+_TEST_UPLOADS = _TEST_ROOT / "uploads"
+_PRODUCTION_UPLOADS = Path(__file__).resolve().parent / "private_uploads"
+
+def _production_upload_snapshot():
+    if not _PRODUCTION_UPLOADS.exists(): return {}
+    return {str(path.relative_to(_PRODUCTION_UPLOADS)): (path.stat().st_size, path.stat().st_mtime_ns)
+            for path in _PRODUCTION_UPLOADS.rglob("*") if path.is_file()}
+
+_PRODUCTION_UPLOADS_BEFORE = _production_upload_snapshot()
+
+def _cleanup_test_root():
+    if _TEST_ROOT.exists():
+        shutil.rmtree(_TEST_ROOT, ignore_errors=True)
+
+atexit.register(_cleanup_test_root)
+
+os.environ["DATABASE_URL"] = f"sqlite:///file:{_TEST_DB_NAME}?mode=memory&cache=shared&uri=true"
+os.environ["UPLOAD_DIR"] = str(_TEST_UPLOADS)
+os.environ["DISABLE_SCHEDULER"] = "1"
+os.environ["OCR_ENABLED"] = "1"
+
+try:
+    import main
+    from main import app
+except Exception:
+    import sys
+    partially_loaded_main = sys.modules.get("main")
+    if partially_loaded_main and hasattr(partially_loaded_main, "engine"):
+        partially_loaded_main.engine.dispose()
+    raise
+
 c = TestClient(app)
+assert main.engine.url.database == f"file:{_TEST_DB_NAME}"
+assert main.UPLOAD_DIR.resolve() == _TEST_UPLOADS.resolve()
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_test_storage():
+    yield
+    c.close()
+    main.engine.dispose()
+    assert _production_upload_snapshot() == _PRODUCTION_UPLOADS_BEFORE
+
 def tok(e):
     response = c.post("/auth/register", json={"email": e, "name": e, "password": "password123"})
     assert response.status_code == 200
@@ -16,6 +61,8 @@ def tok(e):
     assert result.status_code == 200
     return {"Authorization": "Bearer " + result.json()["access_token"]}
 def test_flow():
+    health = c.get("/health")
+    assert health.status_code == 200 and health.json() == {"status": "ok"}
     suffix = uuid4().hex
     email_only = f"first-{suffix}@example.com"
     assert c.post("/auth/register", json={"email": email_only, "password": "password123"}).status_code == 200
@@ -77,7 +124,16 @@ def test_flow():
     assert upload.json()["status"] == "pending_review"
     assert upload.json()["analysis_status"] == "not_analyzed" and upload.json()["analysis"] == []
     assert c.get(f"/patients/{pid}/prescriptions/{prescription_id}/file", headers=x).status_code == 404
+    assert c.get(f"/patients/{pid}/prescriptions", headers=x).status_code == 404
+    assert c.get(f"/patients/{pid}/prescriptions/{prescription_id}/file").status_code == 401
     assert c.get(f"/patients/{pid}/prescriptions/{prescription_id}/file", headers=p).content == image
+    test_session = main.Session_()
+    stored_path = Path(test_session.get(main.Prescription, prescription_id).storage_path).resolve()
+    test_session.close()
+    assert stored_path.is_relative_to(_TEST_UPLOADS.resolve())
+    public_path = "/" + stored_path.relative_to(_TEST_UPLOADS.resolve()).as_posix()
+    assert c.get(public_path).status_code == 404  # no public static-file route
+    assert c.get(f"/private_uploads/{pid}/{stored_path.name}").status_code == 404
     invalid = c.post(f"/patients/{pid}/prescriptions", files={"file": ("invalid.txt", b"not an image", "text/plain")}, headers=p)
     assert invalid.status_code == 415
     oversized = c.post(f"/patients/{pid}/prescriptions", files={"file": ("large.png", b"x" * (10 * 1024 * 1024 + 1), "image/png")}, headers=p)

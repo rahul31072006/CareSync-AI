@@ -187,15 +187,16 @@ async def unexpected_error_handler(request: Request, exc: Exception):
     logger.exception("Unhandled server error for %s", request.url.path)
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
+def db():
+    s = Session_()
+    try: yield s
+    finally: s.close()
+
 @app.get("/health")
 def health(s: Session = Depends(db)):
     s.execute(text("SELECT 1"))
     return {"status": "ok"}
 
-def db():
-    s = Session_()
-    try: yield s
-    finally: s.close()
 def me(tok: str = Depends(oauth), s: Session = Depends(db)) -> User:
     try: uid = int(jwt.decode(tok, SECRET, algorithms=["HS256"])["sub"])
     except (JWTError, KeyError, ValueError): raise HTTPException(401, "Invalid token")
