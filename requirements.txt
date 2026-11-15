@@ -1,0 +1,17 @@
+fastapi
+uvicorn
+sqlalchemy
+psycopg[binary]
+pydantic[email]
+python-jose[cryptography]
+passlib[bcrypt]
+bcrypt<4.1
+python-multipart
+apscheduler
+python-dotenv
+pypdf
+PyMuPDF
+Pillow
+pytesseract
+pytest
+httpx
